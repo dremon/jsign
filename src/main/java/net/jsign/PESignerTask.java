@@ -19,9 +19,13 @@ package net.jsign;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
+import java.security.NoSuchProviderException;
 import java.security.PrivateKey;
+import java.security.Provider;
+import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
@@ -77,6 +81,15 @@ public class PESignerTask extends Task {
 
     /** The URL of the timestamping authority. */
     private String tsaurl;
+    
+    /** Provider class */
+    private String providerClass;
+    
+    /** Provider name */
+    private String providerName;
+    
+    /** Provider configuration file path */
+    private String providerArg;
 
     /** The protocol used for  the timestamping */
     private String tsmode;
@@ -138,35 +151,71 @@ public class PESignerTask extends Task {
     public void setTsaurl(String tsaurl) {
         this.tsaurl = tsaurl;
     }
+    
+    public void setProviderClass(String providerClass) {
+        this.providerClass = providerClass;
+    }
+    
+    public void setProviderArg(String providerArg) {
+        this.providerArg = providerArg;
+    }
+    
+    public void setProviderName(String providerName) {
+        this.providerName = providerName;
+    }
 
     @Override
     public void execute() throws BuildException {
         PrivateKey privateKey;
         Certificate[] chain;
         
+        if (providerClass != null) {
+            try {
+                Class<? extends Provider> providerClassObj = (Class<? extends Provider>) Class.forName(providerClass);
+                
+                Provider provider;
+                if (providerArg == null) {
+                	provider = providerClassObj.newInstance();
+                } else {
+                    provider = providerClassObj.getConstructor(String.class).newInstance(providerArg);
+                }
+                Security.addProvider(provider);
+            } catch (Exception e) {
+                throw new BuildException("provider '" + providerClass + "' could not be created", e);
+            }
+        }
+        
         // some exciting parameter validation...
-        if (keystore == null && keyfile == null && certfile == null) {
-            throw new BuildException("keystore attribute, or keyfile and certfile attributes must be set");
+        if (providerClass == null && keystore == null && keyfile == null && certfile == null) {
+            throw new BuildException("keystore attribute, providerClass, or keyfile and certfile attributes must be set");
         }
         if (keystore != null && (keyfile != null || certfile != null)) {
             throw new BuildException("keystore attribute can't be mixed with keyfile or certfile");
         }
         
-        if (keystore != null) {
+        if (keystore != null || providerClass != null) {
             // JKS or PKCS12 keystore 
             KeyStore ks;
             try {
-                ks = KeyStore.getInstance(storetype);
+            	if (providerName != null) {
+            		ks = KeyStore.getInstance(storetype, providerName);
+            	} else {
+            		ks = KeyStore.getInstance(storetype);
+            	}
+            } catch (NoSuchProviderException e) {
+            	throw new BuildException("no provider '" + providerName + "' for keystore type '" + storetype + "'", e);
             } catch (KeyStoreException e) {
                 throw new BuildException("keystore type '" + storetype + "' is not supported", e);
             }
             
-            if (!keystore.exists()) {
+            if (keystore != null && !keystore.exists()) {
                 throw new BuildException("The keystore " + keystore + " couldn't be found");
             }
             FileInputStream in = null;
             try {
-                in = new FileInputStream(keystore);
+                if (keystore != null) {
+                    in = new FileInputStream(keystore);
+                }
                 ks.load(in, storepass != null ? storepass.toCharArray() : null);
             } catch (Exception e) {
                 throw new BuildException("Unable to load the keystore " + keystore, e);
@@ -184,10 +233,19 @@ public class PESignerTask extends Task {
                 throw new BuildException("alias attribute must be set");
             }
             
-            try {
-                chain = ks.getCertificateChain(alias);
-            } catch (KeyStoreException e) {
-                throw new BuildException(e);
+            if (certfile == null) {
+                try {
+                    chain = ks.getCertificateChain(alias);
+                } catch (KeyStoreException e) {
+                    throw new BuildException(e);
+                }
+            } else {
+                // load the explicit certificate chain
+                try {
+                    chain = loadCertificateChain(certfile);
+                } catch (Exception e) {
+                    throw new BuildException("Failed to load the certificate from " + certfile, e);
+                }
             }
             if (chain == null) {
                 throw new BuildException("No certificate found under the alias '" + alias + "' in the keystore " + keystore);

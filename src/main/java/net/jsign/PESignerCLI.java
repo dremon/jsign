@@ -19,6 +19,8 @@ package net.jsign;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.security.AuthProvider;
 import java.net.Authenticator;
 import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
@@ -30,7 +32,10 @@ import java.net.URI;
 import java.net.URL;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
+import java.security.NoSuchProviderException;
 import java.security.PrivateKey;
+import java.security.Provider;
+import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
@@ -76,6 +81,9 @@ public class PESignerCLI {
         options.addOption(OptionBuilder.hasArg().withLongOpt("keystore").withArgName("FILE").withDescription("The keystore file").withType(File.class).create('s'));
         options.addOption(OptionBuilder.hasArg().withLongOpt("storepass").withArgName("PASSWORD").withDescription("The password to open the keystore").create());
         options.addOption(OptionBuilder.hasArg().withLongOpt("storetype").withArgName("TYPE").withDescription("The type of the keystore:\n- JKS: Java keystore (.jks files)\n- PKCS12: Standard PKCS#12 keystore (.p12 or .pfx files)\n").create());
+        options.addOption(OptionBuilder.hasArg().withLongOpt("providerClass").withArgName("CLASSNAME").withDescription("The fully qualified classname of a provider\n").create());
+        options.addOption(OptionBuilder.hasArg().withLongOpt("providerArg").withArgName("PATH").withDescription("Path to a configuration file\n").create());
+        options.addOption(OptionBuilder.hasArg().withLongOpt("providerName").withArgName("NAME").withDescription("If more than one provider has been configured target a specific provider instance\n").create());
         options.addOption(OptionBuilder.hasArg().withLongOpt("alias").withArgName("NAME").withDescription("The alias of the certificate used for signing in the keystore.").create('a'));
         options.addOption(OptionBuilder.hasArg().withLongOpt("keypass").withArgName("PASSWORD").withDescription("The password of the private key. When using a keystore, this parameter can be omitted if the keystore shares the same password.").create());
         options.addOption(OptionBuilder.hasArg().withLongOpt("keyfile").withArgName("FILE").withDescription("The file containing the private key. Only PVK files are supported. ").withType(File.class).create());
@@ -107,6 +115,9 @@ public class PESignerCLI {
             String storetype = cmd.getOptionValue("storetype");
             String alias = cmd.getOptionValue("alias");
             String keypass = cmd.getOptionValue("keypass");
+            String providerClass = cmd.getOptionValue("providerClass");
+            String providerArg = cmd.getOptionValue("providerArg");
+            String providerName = cmd.getOptionValue("providerName");
             File keyfile = cmd.hasOption("keyfile") ? new File(cmd.getOptionValue("keyfile")) : null;
             File certfile = cmd.hasOption("certfile") ? new File(cmd.getOptionValue("certfile")) : null;
             String tsaurl = cmd.getOptionValue("tsaurl");
@@ -121,6 +132,22 @@ public class PESignerCLI {
             
             File file = cmd.getArgList().isEmpty() ? null : new File(cmd.getArgList().get(0));
 
+            if (providerClass != null) {
+                try {
+                    Class<? extends Provider> providerClassObj = (Class<? extends Provider>) Class.forName(providerClass);
+    
+                    Provider provider;
+                    if (providerArg == null) {
+                    	provider = providerClassObj.newInstance();
+                    } else {
+                        provider = providerClassObj.getConstructor(String.class).newInstance(providerArg);
+                    }
+                    Security.addProvider(provider);
+                } catch (Exception e) {
+                    throw new SignerException("provider '" + providerClass + "' could not be created", e);
+                }
+            }
+            
             if (keystore != null && storetype == null) {
                 // guess the type of the keystore from the extension of the file
                 String filename = keystore.getName().toLowerCase();
@@ -136,28 +163,36 @@ public class PESignerCLI {
             Certificate[] chain;
 
             // some exciting parameter validation...
-            if (keystore == null && keyfile == null && certfile == null) {
-                throw new SignerException("keystore option, or keyfile and certfile options must be set");
+            if (providerClass == null && keystore == null && keyfile == null && certfile == null) {
+                throw new SignerException("keystore option, providerClass option or keyfile and certfile options must be set");
             }
             if (keystore != null && (keyfile != null || certfile != null)) {
                 throw new SignerException("keystore option can't be mixed with keyfile or certfile");
             }
 
-            if (keystore != null) {
+            if (keystore != null || providerClass != null) {
                 // JKS or PKCS12 keystore 
                 KeyStore ks;
                 try {
-                    ks = KeyStore.getInstance(storetype);
+                	if (providerName != null) {
+                		ks = KeyStore.getInstance(storetype, providerName);
+                	} else {
+                		ks = KeyStore.getInstance(storetype);
+                	}
+                } catch (NoSuchProviderException e) {
+                	throw new SignerException("no provider '" + providerName + "' for keystore type '" + storetype + "'", e);
                 } catch (KeyStoreException e) {
                     throw new SignerException("keystore type '" + storetype + "' is not supported", e);
                 }
 
-                if (!keystore.exists()) {
+                if (keystore != null && !keystore.exists()) {
                     throw new SignerException("The keystore " + keystore + " couldn't be found");
                 }
                 FileInputStream in = null;
                 try {
-                    in = new FileInputStream(keystore);
+                    if (keystore != null) {
+                        in = new FileInputStream(keystore);
+                    }
                     ks.load(in, storepass != null ? storepass.toCharArray() : null);
                 } catch (Exception e) {
                     throw new SignerException("Unable to load the keystore " + keystore, e);
@@ -175,10 +210,19 @@ public class PESignerCLI {
                     throw new SignerException("alias option must be set");
                 }
 
-                try {
-                    chain = ks.getCertificateChain(alias);
-                } catch (KeyStoreException e) {
-                    throw new SignerException(e.getMessage(), e);
+                if (certfile == null) {
+                    try {
+                        chain = ks.getCertificateChain(alias);
+                    } catch (KeyStoreException e) {
+                        throw new SignerException(e.getMessage(), e);
+                    }
+                } else {
+                    // load the explicit certificate chain
+                    try {
+                        chain = loadCertificateChain(certfile);
+                    } catch (Exception e) {
+                        throw new SignerException("Failed to load the certificate from " + certfile, e);
+                    }
                 }
                 if (chain == null) {
                     throw new SignerException("No certificate found under the alias '" + alias + "' in the keystore " + keystore);
