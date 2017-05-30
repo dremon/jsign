@@ -25,6 +25,21 @@ See http://ebourg.github.com/jsign for more information.
 Changes
 =======
 
+Version 2.0 (in development)
+* Jsign now requires Java 7 or higher
+* Multiple signatures are now supported. New signatures can replace or be added to the previous ones.
+* PKCS#11 hardware tokens are now supported.
+* The signature algorithm can now be specified independently of the digest algorithm (contributed by Markus Kilås)
+* Timestamping is attempted 3 times by default with a 10 seconds pause if an IOException occurs (contributed by Erwin Tratar)
+* Timestamping can now fail over to other services
+* Private keys in PEM format are now supported (PKCS#1 and PKCS#8, encrypted or not)
+* Upgraded BouncyCastle to 1.54 (contributed by Markus Kilås)
+* Fixed the Accept header for RFC 3161 requests (contributed by Markus Kilås)
+* Internal refactoring to share the code between the Ant task and the CLI tool (contributed by Michael Peterson)
+* The code has been split into distinct modules (core, ant, cli).
+* Jsign is now available as a plugin for Maven (net.jsign:jsign-maven-plugin) and Gradle
+* The API can be used to sign in-memory files using a SeekableByteChannel
+
 Version 1.3, 2016-08-04
 * The command line tool now supports HTTP proxies (contributed by Michael Szediwy)
 * RFC 3161 timestamping services are now supported (contributed by Florent Daigniere)
